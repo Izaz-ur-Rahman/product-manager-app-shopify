@@ -32,3 +32,20 @@ model Session {
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
+
+// Application-specific activity log. This is NOT where product data itself
+// lives (Shopify remains the source of truth for that) — this table only
+// records that an edit happened through this app, so the merchant/developer
+// has an audit trail of what changed, when, and by how much.
+model ProductActivity {
+  id        String   @id @default(cuid())
+  shop      String
+  productId String
+  action    String
+  oldValue  String?
+  newValue  String?
+  createdAt DateTime @default(now())
+
+  @@index([shop])
+  @@index([productId])
+}

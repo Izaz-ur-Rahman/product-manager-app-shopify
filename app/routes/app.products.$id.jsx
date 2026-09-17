@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Form, useActionData, useLoaderData, useNavigate, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 
 const PRODUCT_QUERY = `#graphql
   query getProduct($id: ID!) {
@@ -120,8 +121,16 @@ export const loader = async ({ params, request }) => {
   }
 };
 
+const TRACKED_FIELDS = [
+  { key: "title", label: "title" },
+  { key: "description", label: "description" },
+  { key: "status", label: "status" },
+  { key: "productType", label: "productType" },
+  { key: "vendor", label: "vendor" },
+];
+
 export const action = async ({ request, params }) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const gid = resolveGid(params.id || "");
 
   if (!/^gid:\/\/shopify\/Product\/\d+$/.test(gid)) {
@@ -135,12 +144,25 @@ export const action = async ({ request, params }) => {
   const productType = formData.get("productType")?.toString() ?? "";
   const vendor = formData.get("vendor")?.toString() ?? "";
 
+  // These hidden fields carry the values the form was originally loaded
+  // with, so we can work out exactly what changed without an extra round
+  // trip to Shopify.
+  const original = {
+    title: formData.get("originalTitle")?.toString() ?? "",
+    description: formData.get("originalDescription")?.toString() ?? "",
+    status: formData.get("originalStatus")?.toString() ?? "",
+    productType: formData.get("originalProductType")?.toString() ?? "",
+    vendor: formData.get("originalVendor")?.toString() ?? "",
+  };
+
   if (!title) {
     return { ok: false, error: "Title cannot be empty." };
   }
   if (!VALID_STATUSES.includes(status)) {
     return { ok: false, error: "Please choose a valid status." };
   }
+
+  const updated = { title, description, status, productType, vendor };
 
   try {
     const response = await admin.graphql(UPDATE_PRODUCT_MUTATION, {
@@ -170,6 +192,33 @@ export const action = async ({ request, params }) => {
         ok: false,
         error: payload.userErrors.map((e) => e.message).join(" "),
       };
+    }
+
+    // Shopify accepted the change. Now record it in our own application
+    // database — one row per field that actually changed — so there is an
+    // audit trail independent of Shopify itself. This never overrides
+    // Shopify as the source of truth for the product data; it only tracks
+    // that an edit happened through this app.
+    try {
+      const changedFields = TRACKED_FIELDS.filter(
+        ({ key }) => original[key] !== updated[key],
+      );
+
+      if (changedFields.length > 0) {
+        await prisma.productActivity.createMany({
+          data: changedFields.map(({ key, label }) => ({
+            shop: session.shop,
+            productId: gid,
+            action: `${label}_updated`,
+            oldValue: original[key],
+            newValue: updated[key],
+          })),
+        });
+      }
+    } catch (logErr) {
+      // A logging failure should never block the merchant from knowing
+      // their Shopify update succeeded — we just note it on the server.
+      console.error("Edit Product: failed to write activity log", logErr);
     }
 
     return { ok: true, error: null, savedAt: Date.now() };
@@ -336,6 +385,19 @@ export default function ProductDetails() {
 
         {isEditing && (
           <Form method="post" style={{ marginTop: "1rem" }}>
+            <input type="hidden" name="originalTitle" value={product.title} />
+            <input
+              type="hidden"
+              name="originalDescription"
+              value={product.description}
+            />
+            <input type="hidden" name="originalStatus" value={product.status} />
+            <input
+              type="hidden"
+              name="originalProductType"
+              value={product.productType}
+            />
+            <input type="hidden" name="originalVendor" value={product.vendor} />
             <s-stack direction="block" gap="base">
               <div>
                 <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>
